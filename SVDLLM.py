@@ -8,7 +8,8 @@ import torch
 import torch.nn as nn
 
 from utils.data_utils import *
-from component.svd_llama import SVD_LlamaAttention, SVD_LlamaMLP
+# from component.svd_llama import SVD_LlamaAttention, SVD_LlamaMLP
+from component.svd_llama_new import SVD_LlamaAttention, SVD_LlamaMLP
 from component.svd_mistral import SVD_MistralAttention, SVD_MistralMLP
 from component.svd_opt import SVDOPTDecoderLayer
 from utils.model_utils import *
@@ -78,7 +79,7 @@ def profle_svdllm(name, model, calib_loader, dev):
         
 
 @torch.no_grad()
-def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
+def profle_svdllm_low_resource(model_name, model, calib_loader, dev, im_dev='cuda:3'):
     if "opt" in model_name:
         layers = model.model.decoder.layers
         model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
@@ -94,7 +95,7 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
     inps = torch.zeros(
         (len(calib_loader), model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
-    cache = {'i': 0, 'attention_mask': None, "position_ids": None}
+    cache = {'i': 0, 'attention_mask': None, "position_ids": None,'position_embeddings_0':None,'position_embeddings_1':None,}
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
@@ -102,14 +103,22 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp.cpu()
             cache['i'] += 1
-            if cache['attention_mask'] is None:
-                cache['attention_mask'] = kwargs['attention_mask'].cpu()
-                if "opt" not in model_name:
-                    cache['position_ids'] = kwargs['position_ids'].cpu()
+            if cache['position_ids'] is None:
+                cache['position_ids'] = kwargs['position_ids']
+                cache['position_embeddings_0'] = kwargs['position_embeddings'][0]
+                cache['position_embeddings_1'] = kwargs['position_embeddings'][1]
             else:
-                cache['attention_mask'] = torch.cat((cache['attention_mask'], kwargs['attention_mask'].cpu()), dim=0)
-                if "opt" not in model_name:
-                    cache['position_ids'] = torch.cat((cache['position_ids'], kwargs['position_ids'].cpu()), dim=0)
+                cache['position_ids'] = torch.cat((cache['position_ids'], kwargs['position_ids']), dim=0)
+                cache['position_embeddings_0'] = torch.cat((cache['position_embeddings_0'], kwargs['position_embeddings'][0]), dim=0)
+                cache['position_embeddings_1'] = torch.cat((cache['position_embeddings_1'], kwargs['position_embeddings'][1]), dim=0)
+            # if cache['attention_mask'] is None:
+            #     cache['attention_mask'] = kwargs['attention_mask'].cpu()
+            #     if "opt" not in model_name:
+            #         cache['position_ids'] = kwargs['position_ids'].cpu()
+            # else:
+            #     cache['attention_mask'] = torch.cat((cache['attention_mask'], kwargs['attention_mask'].cpu()), dim=0)
+            #     if "opt" not in model_name:
+            #         cache['position_ids'] = torch.cat((cache['position_ids'], kwargs['position_ids'].cpu()), dim=0)
             raise ValueError
     layers[0] = Catcher(layers[0])
     for batch in calib_loader:
@@ -130,6 +139,12 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
     torch.cuda.empty_cache()
     outs = torch.zeros_like(inps)
     attention_masks = cache['attention_mask']
+    # position_embeddings = cache['position_embeddings']
+    position_embeddings = (cache['position_embeddings_0'],cache['position_embeddings_1'])
+    # print(type(position_embeddings),len(position_embeddings))
+    # print(position_embeddings[0].shape)
+    # print(position_embeddings[1].shape)
+    # exit(0)
     if "opt" not in model_name:
         position_ids = cache['position_ids']
     profiling_mat = {}
@@ -139,10 +154,13 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
         subset = find_layers(layer)        
         def hook(module, input, output):
             inp = input[0].detach().float()
+            # print('\ninp',inp.shape)
             if inp.dim() == 2:  # for opt
                 inp = inp.unsqueeze(0)
             adds = torch.matmul(inp.transpose(1,2), inp)
+            # print('adds',adds.shape)
             adds_sum = torch.sum(adds, dim=0)
+            # print('adds_sum',adds_sum.shape)
             module.scaling_diag_matrix += adds_sum
             del inp, adds, adds_sum, output
             torch.cuda.empty_cache()
@@ -151,10 +169,17 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
             subset[name].scaling_diag_matrix = 0
             handles.append(subset[name].register_forward_hook(hook))
         for j in range(inps.shape[0]):
+            attention_mask=attention_masks[j].unsqueeze(0).to(dev) if attention_masks is not None else None
+            p=(position_embeddings[0][j].unsqueeze(0).to(dev), position_embeddings[1][j].unsqueeze(0).to(dev))
             if "opt" not in model_name:
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_masks[j].unsqueeze(0).to(dev), position_ids=position_ids[j].unsqueeze(0).to(dev))[0]
+                outs[j] = layer(
+                    inps[j].unsqueeze(0),
+                    attention_mask=attention_mask,
+                    position_ids=position_ids[j].unsqueeze(0).to(dev),
+                    position_embeddings=p,
+                    )[0]
             else:
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_masks[j].unsqueeze(0).to(dev))[0]
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, )[0]
         for h in handles:
             h.remove()
         layer = layer.cpu()
@@ -196,9 +221,8 @@ def whitening(model_name, model, profiling_mat, ratio, dev):
         subset = find_layers(layer)
         #### Replace Attn, MLP ####
         if "llama" in model_name or "vicuna" in model_name:
-            svd_attn = SVD_LlamaAttention(config=model.config, ratio=ratio)
-            # svd_mlp = SVD_LlamaMLP(hidden_size=layer.hidden_size, intermediate_size=model.config.intermediate_size, hidden_act=model.config.hidden_act, ratio=ratio)
-            svd_mlp = SVD_LlamaMLP(hidden_size=layer.hidden_size, intermediate_size=model.config.intermediate_size, hidden_act=model.config.hidden_act, ratio=ratio)
+            svd_attn = SVD_LlamaAttention(config=model.config, layer_idx=i, ratio=ratio)
+            svd_mlp = SVD_LlamaMLP(config=model.config, ratio=ratio)
         elif "mistral" in model_name:
             svd_attn = SVD_MistralAttention(config=model.config, ratio=ratio)
             svd_mlp = SVD_MistralMLP(config=model.config, ratio=ratio)
@@ -344,8 +368,8 @@ def whitening_local_update(model_name, model, dataloader, profiling_mat, ratio, 
         subset = find_layers(layer)
         gpts = {}
         if "llama" in model_name or "vicuna" in model_name:
-            svd_attn = SVD_LlamaAttention(config=model.config, ratio=ratio)
-            svd_mlp = SVD_LlamaMLP(hidden_size=layer.hidden_size, intermediate_size=model.config.intermediate_size, hidden_act=model.config.hidden_act, ratio=ratio)
+            svd_attn = SVD_LlamaAttention(config=model.config, layer_idx=i, ratio=ratio)
+            svd_mlp = SVD_LlamaMLP(config=model.config, ratio=ratio)
         elif "mistral" in model_name:
             svd_attn = SVD_MistralAttention(config=model.config, ratio=ratio)
             svd_mlp = SVD_MistralMLP(config=model.config, ratio=ratio)
@@ -523,7 +547,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     args.ratio = 1- args.ratio
     if args.step == 1:
-        model, tokenizer = get_model_from_huggingface(model_id=args.model)
+        model, tokenizer = get_model_from_huggingface(model_id=args.model,device=args.DEV)
         model = model.eval()
         if args.profiling_mat_path is None:
             cali_white_data = get_calib_train_data(args.dataset, tokenizer, args.whitening_nsamples, seqlen=args.model_seq_len)

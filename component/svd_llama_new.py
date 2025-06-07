@@ -115,7 +115,7 @@ class SVD_LlamaMLP(nn.Module):
         
         self.up_u_proj = nn.Linear(low_rank, self.intermediate_size, bias=False)
         self.up_v_proj = nn.Linear(self.hidden_size, low_rank, bias=False)
-        self.act_fn = ACT2FN[self.hidden_act]
+        self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
         up = self.up_u_proj(self.up_v_proj(x))
@@ -159,10 +159,10 @@ def eager_attention_forward(
 
     return attn_output, attn_weights
 
-class LlamaAttention(nn.Module):
+class SVD_LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig, layer_idx: int):
+    def __init__(self, config: LlamaConfig, layer_idx:int = -1, ratio:float = 1.0):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -172,7 +172,8 @@ class LlamaAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
-        low_rank = int(self.hidden_size * self.ratio/2)
+        self.ratio=ratio
+        low_rank = int(config.hidden_size * self.ratio/2)
 
         self.q_u_proj = nn.Linear(low_rank, config.num_attention_heads * self.head_dim, bias=False)
         self.q_v_proj = nn.Linear(config.hidden_size, low_rank, bias=False)
