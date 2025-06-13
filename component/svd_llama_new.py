@@ -159,6 +159,11 @@ def eager_attention_forward(
 
     return attn_output, attn_weights
 
+def get_rank(ratio,a,b):
+    low_rank = a*b*ratio / (a+b)
+    return int(low_rank)
+    # low_rank = int(self.intermediate_size * self.hidden_size * self.ratio / (self.intermediate_size + self.hidden_size))
+
 class SVD_LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -173,19 +178,21 @@ class SVD_LlamaAttention(nn.Module):
         self.is_causal = True
 
         self.ratio=ratio
-        low_rank = int(config.hidden_size * self.ratio/2)
+        # low_rank = int(config.hidden_size * self.ratio/2)
+        qo_rank = get_rank(self.ratio,config.hidden_size,config.num_attention_heads * self.head_dim)
+        kv_rank = get_rank(self.ratio,config.hidden_size,config.num_key_value_heads * self.head_dim)
 
-        self.q_u_proj = nn.Linear(low_rank, config.num_attention_heads * self.head_dim, bias=False)
-        self.q_v_proj = nn.Linear(config.hidden_size, low_rank, bias=False)
+        self.q_u_proj = nn.Linear(qo_rank, config.num_attention_heads * self.head_dim, bias=False)
+        self.q_v_proj = nn.Linear(config.hidden_size, qo_rank, bias=False)
 
-        self.k_u_proj = nn.Linear(low_rank, config.num_key_value_heads * self.head_dim, bias=False)
-        self.k_v_proj = nn.Linear(config.hidden_size, low_rank, bias=False)
+        self.k_u_proj = nn.Linear(kv_rank, config.num_key_value_heads * self.head_dim, bias=False)
+        self.k_v_proj = nn.Linear(config.hidden_size, kv_rank, bias=False)
 
-        self.v_u_proj = nn.Linear(low_rank, config.num_key_value_heads * self.head_dim, bias=False)
-        self.v_v_proj = nn.Linear(config.hidden_size, low_rank, bias=False)
+        self.v_u_proj = nn.Linear(kv_rank, config.num_key_value_heads * self.head_dim, bias=False)
+        self.v_v_proj = nn.Linear(config.hidden_size, kv_rank, bias=False)
 
-        self.o_u_proj = nn.Linear(low_rank, config.hidden_size, bias=False)
-        self.o_v_proj = nn.Linear(config.num_attention_heads * self.head_dim, low_rank, bias=False)
+        self.o_u_proj = nn.Linear(qo_rank, config.hidden_size, bias=False)
+        self.o_v_proj = nn.Linear(config.num_attention_heads * self.head_dim, qo_rank, bias=False)
 
     def forward(
         self,
@@ -199,9 +206,9 @@ class SVD_LlamaAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        # query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        # key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        # value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         query_states = self.q_u_proj(self.q_v_proj(hidden_states)).view(hidden_shape).transpose(1, 2)
         key_states = self.k_u_proj(self.k_v_proj(hidden_states)).view(hidden_shape).transpose(1, 2)
         value_states = self.v_u_proj(self.v_v_proj(hidden_states)).view(hidden_shape).transpose(1, 2)
