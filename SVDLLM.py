@@ -79,15 +79,9 @@ def profle_svdllm(name, model, calib_loader, dev):
 
 @torch.no_grad()
 def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
-    if "opt" in model_name:
-        layers = model.model.decoder.layers
-        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
-        model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(dev)
-        model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
-    else:
-        layers = model.model.layers
-        model.model.embed_tokens = model.model.embed_tokens.to(dev)
-        model.model.norm = model.model.norm.to(dev)
+    layers = model.model.layers
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -118,18 +112,12 @@ def profle_svdllm_low_resource(model_name, model, calib_loader, dev):
             pass
     layers[0] = layers[0].module
     layers[0] = layers[0].cpu()
-    if "opt" in model_name:
-        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.cpu()
-        model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.cpu()
-        model.model.decoder.embed_positions = model.model.decoder.embed_positions.cpu()
-    else:  
-        model.model.embed_tokens = model.model.embed_tokens.cpu()
-        model.model.norm = model.model.norm.cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
     torch.cuda.empty_cache()
     outs = torch.zeros_like(inps)
     attention_masks = cache['attention_mask']
-    if "opt" not in model_name:
-        position_ids = cache['position_ids']
+    position_ids = cache['position_ids']
     profiling_mat = {}
     for i in tqdm(range(len(layers))):
         layer_profile = {}
